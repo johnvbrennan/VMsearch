@@ -1,0 +1,130 @@
+Author: John Brennan (R00104987)
+
+DESIGN DOCUMENT
+===============
+
+Resources
+=========
+design	    - design document for this assignment
+search.pl   - perl script file that enables searches for virtual machines
+
+Assumptions
+===========
+1. The following input parameter requires the VM Ware tools to be installed on the guest Operating System: --ip. In the event that tools are not installed then the VM will be considered to not match on the IP address supplied.
+2. The input parameters --network and --mac will not use the VM Ware tools option and will instead use the hardware->devices array. This is because the specification only outlined to use VM Ware tools for the --ip parameter.
+3. Input parameters that involve string comparison will use case sensitive comparison, e.g. --network, --mac, --datastore
+4. The script implements the following no--XXX-connected options:
+	no--cdrom-connected
+	no--network-connected
+
+Parameter Validation
+====================
+The Opts::validate() will perform the bulk of the validation on the input parameters specified in the script. However, we need to validate the values specified for the following input parameters:
+
+--power
+The value supplied for power must be one of the following: poweredOn, poweredOff or suspended
+
+--scsi-type
+The value supplied for scsi-type must be one of the following: ParaVirtualSCSIController, VirtualBusLogicController, VirtualLsiLogicController or VirtualLsiLogicSASController.
+ 
+-- net-type 
+The value supplied for net-type must be one of the following: VirtualVmxnet2, VirtualVmxnet3, VirtualPCNet32, VirtualE1000e or VirtualE1000
+
+If an invalid value is supplied for any of the parameters outlined above then the script will print an error message to the standard error and exit using the die() command.
+
+Overview
+=========
+
+The application searches for Virtual Machines that match ALL of the parameters supplied. Object searches using the vSphere SDK can be performed using the find_entity_views() method. This method takes the following parameters:
+
+1. Data type of the object to search for. In this case this will be hard coded to "VirtualMachine" since this is the only thing our program is searching for.
+2. A hash filter, this is a dictionary of name value pairs that enable us to filter the list of results to virtual machines that have properties matching those defined in the hash filter.
+3. List of properties that the returned object should include. These are the properties we are interested in viewing the value of.
+
+The value of the 'filter' parameter is an anonymous hash reference containing one or more pairs of filter criteria. Each of the criteria is a property path and a match value. The match value can be either a string or a regular expression object. If the match value is a string, the value of the property must match the string exactly (including case). To match Boolean values, use the strings true and false.
+
+The hash filter is limited in how it can be applied because it can only be applied to "simple" types. Simple types are properties on a vSphere object of type integer, string, datetime, boolean, enumeration etc. The hash filter cannot be used to match "Complex" types such as arrays and an alternative approach will be required to search for these complex types.
+
+Classifying Input Parameters
+============================
+
+Firstly, we can break down our input parameters into simple and complex types. The simple types can be used in the hash filter to search for matching virtual machines. The complex types will require our application to iterate over each virtual machine and manually inspect the relevant property to see if it matches the value supplied on the input parameter. Iterating over each virtual machine is an expensive operation especially if there are many virtual machines in the returned by find_entity_views();
+
+You can match only properties that have simple types like strings and numbers. Specifying a property with a complex type as an argument to a filter results in a fatal runtime error. For example, you cannot specify the runtime property of a VirtualMachine object in a filter as it is a complex object, not a string.
+
+Simple Parameters
+=================
+
+The following input parameters can be used in the hash filter that is passed to find_entity_views. 
+
+--vm: the virtual machine name is stored on a property of the VirtualMachineConfigInfo class called 'name'. It is of type string and can be retrieved from the VirtualMachine object using the format 'myVirtualMachine.config.name'. In the hash filter we just use 'config.name'.
+
+--power: this is a property of type VirtualMachinePowerState. This is an enumeration type. Valid values are poweredOn, poweredOff and suspended. The power options are stored on a property of the VirtualMachineRuntimeInfo class called  'powerState'. It can be retrieved from the VirtualMachine object using the format 'myVirtualMachine.runtime.powerState'.
+
+A dedicated subroutine called CreateSimpleSearchFilter() will create the hash filter. In the event that the --vm or --power options were not supplied then the hash filter will be empty and all virtual machines on the target/host will be returned in the call to find_entity_views().
+
+Complex Parameters
+==================
+
+The remaining input parameters cannot be handled by the hash filter in the call to find_entity_views. Unfortunately, it is necessary to enumerate through each virtual machine and manually inspect the property that we are trying to match on. 
+
+The following section outlines the properties on the VirtualMachine object that will be inspected for each input parameter:
+
+--ip
+guest->net - this stores a collection of Network Cards on the VirtualMachine
+We need to enumerate the list of ipAddress on each NIC to find a matching IP/mac address.
+
+--network
+config->hardware->device->backing->network->name
+We need to enumerate over each device that is a NIC and then inspect the network object which is a property on the "backing" object. We use Vim::get_view() load the network details. We are only interested in the "name" property.
+
+--mac
+config->hardware->device
+We need to enumerate over each device that is a NIC and check the macAddress property on the device.
+
+--scsi-type
+config->hardware->device - this collection stores the list of devices that are on the VirtualMachine
+In this case we enumerate over each item in the array and check if the type of the item is in the list of valid SCSI types. We can do this using isa() to check if the object is of a particular type.
+
+--net-type
+config->hardware->device - this collection stores the list of devices that are on the VirtualMachine
+We iterate over each item in the array and check that the type of the object is in the list of valid options for network controller type.
+
+--network--connected
+config->hardware->device
+We enumerate each item in the array and check if the device is a network card device. If it is we then check if it is connected by checking the connected property.
+
+--cdrom--connected
+--no--cdrom-connected
+config->hardware->device
+We enumerate each item in the array and check if the device is a VirtualCdrom device. If it is we then check if it is connected by checking the device's "connected" property. This property is set to true if connected and false otherwise.
+
+--vmserver
+summary->runtime->host->name
+We check the hostname of the ESXi server on which the virtual machine is running. The "host" property is a managed object reference to the HostSystem so we need to use Vim::get_view to load that object. We use the "properties" hash on Vim::get_view to just return the "name" property which holds the name of the ESX host. We are not interested in any of the other properties on the host.
+
+--datastore
+config->datastoreUrl
+The data stores on the VM are stored as an array of VirtualMachineConfigInfoDatastoreUrlPair. We iterate over each item in the array and check the "name" property of that datastore.
+
+--cdrom-iso 
+config->hardware->device
+We check each device attached to the VirtualMachine. If the device is of type VirtualCdrom VM then we check the backing->fileName property which stores the name of the ISO image used on this device. The backing object is also checked to see if it is of type VirtualCdromIsoBackingInfo so that we are sure it is a virtual cdrom based on an ISO image.
+
+Performance
+===========
+
+Application performance is a concern when searching for virtual machines, particularly when we are searching for objects that have properties that match our 'complex' input parameters because we need to iterate over each virtual machine and inspect each property to see if it is a match.  One way of reducing overhead is to specify the list of properties on the VirtualMachine that should be returned when find_entity_views() executes. This significantly reduces the size of each object returned thus improving performance.
+
+Algorithm
+=========
+
+1. Validate input parameters. Check that all options supplied are valid. If any options is invalid then print message and exit.
+2. Create simple hash filter using --power and --vm options.
+3. Connect and execute query using find_entity_views() to return all virtual machines matching the hash filter created in step 2. Use the "properties" parameter in find_entity_views() to reduce the size of each object returned as much as possible.
+4. Iterate over each VirtualMachine returned from the query executed in step 3. 
+	Apply each filter for each "complex" input parameter specified. Each of the filters will be implemented in a separate routine that returns true if a match is found for the filter and false otherwise. For performance reasons, each subroutine will only be executed if the corresponding input parameter has been specified.
+	If the VirtualMachine does not match a filter then the subroutine will return false. No further subroutines are executed for that virtual machine result. Since the object is found to not match on one of the input parameters we do not need to apply any additional filters on this object as an object must match all filters to be considered a valid match. The "next" keyword is used to jump to the next item in the result set without printing the name of the vm and its mo_ref.
+5. If all executed subroutines return true (i.e. successful match) then the code reaches the end of the for loop iteration. The VirtualMachine Name and mo_ref are printed to the screen.
+
+
